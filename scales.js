@@ -50,18 +50,37 @@ const concurrency = { concurrency: 1 };
 
 console.log('Creating scales and intervals...');
 
-const indexes = [':Interval(name)', ':Tone(name)', ':Scale(name)', ':ScaleInstance(name)'];
+const indexes = [':Interval(name)', ':Tone(name)', ':Scale(name)', ':Chord(name)', ':ScaleInstance(name)'];
 
-Promise.map(indexes, idx => session.run(`CREATE INDEX on ${idx}`), concurrency)
-  .then(() => Promise.map(tonal.scale.names(), scaleName => {
-  return session.run('MERGE (s:Scale { name: $scaleName })', { scaleName });
-}, concurrency))
-  .then(() => Promise.map(tonics, tonic => {
-    return session.run('MERGE (t:Tone { name: $tonic })', { tonic });
-  }), concurrency)
-  .then(() => Promise.map(tonal.Interval.names(), intervalName => {
+const initIndexes = () =>
+  Promise.map(indexes,
+    idx => session.run(`CREATE INDEX on ${idx}`),
+    concurrency);
+
+const initChords = () =>
+  Promise.map(tonal.Chord.names(),
+    chordName => session.run('MERGE (c:Chord { name: $chordName })',
+      { chordName }), concurrency);
+
+const initNotes = () =>
+  Promise.map(tonics,
+    tonic => session.run('MERGE (t:Tone { name: $tonic })', { tonic }), concurrency)
+
+const initIntervals = () =>
+  Promise.map(tonal.Interval.names(), intervalName => {
     return session.run('MERGE (i:Interval { name: $intervalName })', { intervalName });
-  }, concurrency))
+  }, concurrency);
+
+const initScales = () =>
+  Promise.map(tonal.Scale.names(), scaleName => {
+    return session.run('MERGE (s:Scale { name: $scaleName })', { scaleName });
+  }, concurrency);
+
+return initIndexes()
+  .then(initScales)
+  .then(initNotes)
+  .then(initChords)
+  .then(initIntervals)
   .then(() => {
     tonal.scale.names().map(scaleName => {
       tonics.map(tonic => {
