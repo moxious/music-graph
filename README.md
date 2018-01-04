@@ -6,6 +6,9 @@ Creates a graph representing a number of music theory concepts in a neo4j instan
 
 ## Configuration
 
+(First make sure you've installed neo4j and it's running wherever you need it.
+If you want a free instance, head over to [neo4jsandbox.com](https://neo4j.com/sandbox-v2/))
+
 ```
 yarn install
 
