@@ -1,10 +1,12 @@
 const tonal = require('tonal');
 const neo4j = require('neo4j-driver').v1;
 const Promise = require('bluebird');
+const _ = require('lodash');
 
 const driver = neo4j.driver(process.env.NEO4J_URL || 'bolt://localhost',
   neo4j.auth.basic(process.env.NEO4J_USER, process.env.NEO4J_PASSWORD));
-const session = driver.session();
+
+let session = driver.session();
 
 const tonics = [
   'A', 'A#', 'Bb', 'B', 'C',
@@ -13,19 +15,8 @@ const tonics = [
 ];
 
 let queriesRun = 0;
-const queriesAndParams = [];
-
-const runQueryWithParams = qAndP => {
-  queriesRun++;
-  if (queriesRun % 50 === 0) {
-    console.log('Run ', queriesRun, 'of ', queriesAndParams.length);
-  }
-  return session.run(qAndP[0], qAndP[1]);
-}
 
 const concurrency = { concurrency: 1 };
-
-console.log('Creating scales and intervals...');
 
 const indexes = [
   ':Interval(name)', 
@@ -56,19 +47,41 @@ const twoWayAlternativeNames = {
 const getAlternativeName = note =>
   twoWayAlternativeNames[note] || '';
 
-const initIndexes = () =>
+const initIndexes = (tx) =>
   Promise.map(indexes,
-    idx => session.run(`CREATE INDEX on ${idx}`),
+    idx => tx.run(`CREATE INDEX on ${idx}`),
     concurrency);
 
-const initChords = () =>
+const withTx = promiseReturningFunction => () => {
+  const tx = session.beginTransaction();
+
+  return promiseReturningFunction(tx)
+    .then(results => new Promise((resolve, reject) => {
+      tx.commit()
+        .subscribe({
+          onCompleted: () => {
+            console.log('tx commit complete');
+            return resolve(results);
+          },
+          onError: (err) => reject(err),
+        });
+    }));
+};
+
+const runQueries = someFunction => () => {
+  const queries = someFunction();
+  console.log('Got ', queries.length, ' queries.  Running them now.');
+  return withTx((tx) => Promise.map(queries, query => tx.run(query[0], query[1]), concurrency))();
+};
+
+const initChords = (tx) =>
   Promise.map(tonal.Chord.names(),
-    chordName => session.run('MERGE (c:Chord { name: $chordName })',
+    chordName => tx.run('MERGE (c:Chord { name: $chordName })',
       { chordName }), concurrency);
 
-const initNotes = () =>
+const initNotes = (tx) =>
   Promise.map(tonal.Note.names(),
-    tonic => session.run(
+    tonic => tx.run(
       'MERGE (t:Tone { name: $tonic, chroma: $chroma, alternativeName: $alternativeName })',
       {
         tonic,
@@ -77,50 +90,45 @@ const initNotes = () =>
       }), concurrency)
 
 const chordIntervals = () =>
-    Promise.map(tonal.Chord.names(),
-    chord => {
+    _.flatten(tonal.Chord.names().map(chord => {
       const intervals = tonal.Chord.intervals(chord);
-      return Promise.map(intervals, 
-        interval => session.run(
+      return intervals.map(interval => [
           `MATCH (i:Interval { name: $interval })
           MATCH (c:Chord { name: $chord })
           MERGE (c)-[:contains]->(i)`,
           { interval, chord }
-        ), concurrency);
-    }, { concurrency: 1 });
+      ]);
+    }));
 
-const generateNoteDistances = () => {
-  tonal.Note.names().forEach(note1 => {
-    tonal.Note.names().forEach(note2 => {
+const generateNoteDistances = () =>
+  _.flatten(tonal.Note.names().map(note1 => {
+    return tonal.Note.names().map(note2 => {
       const distance = tonal.Distance.interval(note1, note2);
-      queriesAndParams.push([
+      return [
         `MATCH (n1:Tone { name: $note1 })
          MATCH (n2:Tone { name: $note2 })
          MERGE (n1)-[:interval { distance: $distance }]->(n2)`,
         { note1, note2, distance },
-      ]);
+      ];
     })
-  });
-};
+  }));
 
-const initIntervals = () =>
+const initIntervals = (tx) =>
   Promise.map(tonal.Interval.names(), intervalName => {
-    return session.run('MERGE (i:Interval { name: $intervalName })', { intervalName });
+    return tx.run('MERGE (i:Interval { name: $intervalName })', { intervalName });
   }, concurrency);
 
-const initScales = () =>
+const initScales = (tx) =>
   Promise.map(tonal.Scale.names(), scaleName => {
-    return session.run('MERGE (s:Scale { name: $scaleName })', { scaleName });
+    return tx.run('MERGE (s:Scale { name: $scaleName })', { scaleName });
   }, concurrency);
 
-const initChordInstances = () => {
-  tonal.chord.names().forEach(chord => {
-    tonics.forEach(tonic => {
+const initChordInstances = () =>
+  _.flatten(tonal.chord.names().map(chord => {
+    return tonics.map(tonic => {
       const chordInstance = `${tonic} ${chord}`;
-      const notes = tonal.Chord.notes(chordInstance);
-      const intervals = tonal.Chord.intervals(chord);
 
-      queriesAndParams.push([
+      return [
         `MATCH (t:Tone { name: $tonic })
         MATCH (c:Chord { name: $chord })
         MERGE (chordInstance:ChordInstance { name: $chordInstance })
@@ -128,9 +136,12 @@ const initChordInstances = () => {
         MERGE (chordInstance)-[:has_tonic]->(t)
         `,
         { chordInstance, chord, tonic }
-      ]);
+      ];
     });
-  });
+  }));
+
+const initChordInstanceMappings = () => {
+  const queries = [];
 
   // Unfortunately it's necessary to go through this double loop twice to ensure
   // all chord instances are created in various parallelism cases.
@@ -140,30 +151,39 @@ const initChordInstances = () => {
       const notes = tonal.Chord.notes(chordInstance);
       const intervals = tonal.Chord.intervals(chord);
       
-      notes.forEach(note =>
-        queriesAndParams.push([
+      notes.forEach((note, idx) =>
+        queries.push([
           `MATCH (ci:ChordInstance { name: $chordInstance })
           MATCH (n:Tone { name: $note })
-          MERGE (n)-[:in]->(ci)`,
-          { note: tonal.Note.simplify(note), chordInstance },
+          MERGE (n)-[:in { function: $interval }]->(ci)`,
+          { 
+            note: tonal.Note.simplify(note),
+            chordInstance,
+            interval: intervals[idx],
+          },
         ]));
 
-      intervals.forEach(interval =>
-        queriesAndParams.push([
+      intervals.forEach((interval, idx) => {        
+        queries.push([
           `MATCH (i:Interval { name: $interval })
            MATCH (ci:ChordInstance { name: $chordInstance })
-           MERGE (ci)-[:contains]->(i)`,
-          { interval, chordInstance },
-        ]));
+           MERGE (ci)-[:contains { instance: $note }]->(i)`,
+          { interval, chordInstance, note: notes[idx] },
+        ]);
+      });
     });
   });
+
+  return queries;
 };
 
 /**
  * For each tonic and scale type, create a scale instance (e.g. C major).
  * Map that scale instance to the tones and intervals it contains.
  */
-const initScaleInstances = () =>
+const initScaleInstances = () => {
+  const queries = [];
+
   tonal.scale.names().map(scaleName => {
     tonics.map(tonic => {
       const intervals = tonal.scale(scaleName);
@@ -175,10 +195,10 @@ const initScaleInstances = () =>
         MATCH (scale:Scale { name: $scaleName })
         MERGE (scaleInstance:ScaleInstance { name: $scaleInstanceName })
         MERGE (scaleInstance)-[:instance_of]->(scale)`;
-      queriesAndParams.push([query, { scaleName, scaleInstanceName }]);
+      queries.push([query, { scaleName, scaleInstanceName }]);
 
       intervals.map(name => {
-        queriesAndParams.push([
+        queries.push([
           `MATCH (i:Interval { name: $name }) 
           MATCH (s:Scale { name: $scaleName })
           MERGE (s)-[:contains]->(i)`, { scaleName, name }
@@ -186,7 +206,7 @@ const initScaleInstances = () =>
       });
 
       scale.map(note => {
-        queriesAndParams.push([
+        queries.push([
           `MATCH (n:Tone { name: $note })
           MATCH (si:ScaleInstance { name: $scaleInstanceName })
           MERGE (n)-[:in]->(si)
@@ -196,18 +216,26 @@ const initScaleInstances = () =>
     });
   });
 
-return initIndexes()
-  .then(initScales)
-  .then(initNotes)
-  .then(initChords)
-  .then(initIntervals)
-  .then(chordIntervals)
-  .then(generateNoteDistances)
-  .then(initScaleInstances)
-  .then(initChordInstances)
-  .then(() =>
-    // Run a huge pile queries, concurrency here is critical.
-    Promise.map(queriesAndParams, qAndP => runQueryWithParams(qAndP), concurrency))
+  return queries;
+};
+ 
+const debug = x => () => console.log(x);
+
+return withTx(initIndexes)()
+  .then(debug('scales'))
+  .then(withTx(initScales))
+  .then(debug('notes'))
+  .then(withTx(initNotes))
+  .then(debug('chords'))
+  .then(withTx(initChords))
+  .then(withTx(initIntervals))
+  .then(runQueries(chordIntervals))
+  .then(debug('init chord instances'))
+  .then(runQueries(initChordInstances))
+  .then(debug('generateNoteDistances'))
+  .then(runQueries(generateNoteDistances))
+  .then(runQueries(initScaleInstances))
+  .then(runQueries(initChordInstanceMappings))
   .then(() => console.log('All done'))
   .catch(err => console.error(err))
   .finally(() => driver.close());

@@ -17,6 +17,10 @@ core-js@^2.4.0:
   version "2.5.3"
   resolved "https://registry.yarnpkg.com/core-js/-/core-js-2.5.3.tgz#8acc38345824f16d8365b7c9b4259168e8ed603e"
 
+lodash@^4.17.4:
+  version "4.17.4"
+  resolved "https://registry.yarnpkg.com/lodash/-/lodash-4.17.4.tgz#78203a4d1c328ae1d86dca6460e369b57f4055ae"
+
 neo4j-driver@^1.5.1:
   version "1.5.1"
   resolved "https://registry.yarnpkg.com/neo4j-driver/-/neo4j-driver-1.5.1.tgz#54679dc467fde957fb7c8f0553cd5f8cc98e0531"
