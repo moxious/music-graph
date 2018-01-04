@@ -16,9 +16,23 @@ export NEO4J_PASSWORD=admin
 
 ## Run
 
-node generate-music-graph.js
+```node generate-music-graph.js```
 
-More coming soon.
+# Why do this?
+
+Because it's useful for [aleatoric music](https://en.wikipedia.org/wiki/Aleatoric_music) and other
+computer music composition.  Theory libraries such as [tonal.js](https://github.com/danigb/tonal) 
+(which was used in this code) are good for figuring out correspondances, but sometimes a composition
+engine wants to make a long-term plan, for example a chord progression that moves over time to 
+give a composition structure.
+
+It's useful to be able to represent what the algorithm does in a graph format for storage, and also 
+how what the algorithm does connects to music structure.
+
+Individual melodies may be represented as a time-weighted path through the graph.  For example,
+"Mary had a little lamb" can be represented as the path:
+
+`E -> D -> C -> D -> E -> E -> E`
 
 # Database Schema
 
